@@ -1,4 +1,4 @@
-import { SURFACES, MOTIONS, SECTION_TYPES, CONFIG_KEYS, validateConfig } from '../../src/configSchema.js';
+import { SURFACES, MOTIONS, SECTION_TYPES, CONFIG_KEYS, validateConfig } from './src/configSchema.js';
 
 const DEFAULT_ALLOWED_ORIGINS = [
   'http://localhost:5173',
