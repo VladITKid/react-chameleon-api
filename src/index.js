@@ -55,6 +55,74 @@ function validateConfig(config) {
 }
 // --- конец вшитой схемы ---
 
+// --- Безопасное слияние ответа модели с текущим конфигом ---
+// Даже если модель вернёт неполный JSON, мы не затираем существующие секции
+// и поля пустыми значениями. Массивы объектов с id (секции, пункты списков)
+// сливаются по id: совпавшие обновляются, отсутствующие у модели сохраняются.
+function isKeyedArray(value) {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.every((item) => isObject(item) && typeof item.id === 'string' && item.id)
+  );
+}
+
+function mergeKeyedArray(current, incoming) {
+  const incomingById = new Map(incoming.map((item) => [item.id, item]));
+  const currentIds = new Set(current.map((item) => item.id));
+
+  const merged = current.map((item) => {
+    const incomingItem = incomingById.get(item.id);
+    return incomingItem ? mergeValue(item, incomingItem) : item;
+  });
+
+  const added = incoming.filter((item) => !currentIds.has(item.id));
+  return merged.concat(added);
+}
+
+function mergeValue(current, incoming) {
+  // Пустое/отсутствующее значение не затирает текущее.
+  if (incoming === undefined || incoming === null || incoming === '') return current;
+
+  if (Array.isArray(current) && Array.isArray(incoming)) {
+    if (incoming.length === 0) return current;
+    if (isKeyedArray(current) && isKeyedArray(incoming)) {
+      return mergeKeyedArray(current, incoming);
+    }
+    return incoming;
+  }
+
+  if (isObject(current) && isObject(incoming)) {
+    const result = { ...current };
+    for (const key of Object.keys(incoming)) {
+      result[key] = mergeValue(current[key], incoming[key]);
+    }
+    return result;
+  }
+
+  return incoming;
+}
+
+function mergeConfig(current, incoming) {
+  const merged = mergeValue(current, incoming);
+  return isObject(merged) ? merged : current;
+}
+
+function deepEqual(a, b) {
+  if (a === b) return true;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((item, index) => deepEqual(item, b[index]));
+  }
+  if (isObject(a) && isObject(b)) {
+    const keysA = Object.keys(a);
+    const keysB = Object.keys(b);
+    if (keysA.length !== keysB.length) return false;
+    return keysA.every((key) => deepEqual(a[key], b[key]));
+  }
+  return false;
+}
+// --- конец безопасного слияния ---
+
 const DEFAULT_ALLOWED_ORIGINS = [
   'http://localhost:5173',
   'http://127.0.0.1:5173',
@@ -170,9 +238,23 @@ async function commitToSupabase({ env, config, currentVersion, updatedBy }) {
 
 function buildSystemPrompt() {
   return [
-    'Ты ассистент редактирования конфигурации лендинга в формате JSON.',
+    'Ты ассистент редактирования лендинга. Ты правишь ТОЛЬКО настройки страницы:',
+    'тему и цвета, шрифты, тексты, секции (их состав, порядок, variant, surface, motion),',
+    'layout, header и footer. Ничего другого ты не делаешь.',
+    '',
     'На вход ты получаешь текущий JSON-конфиг и инструкцию пользователя на естественном языке.',
-    'Твоя задача — вернуть ПОЛНЫЙ обновлённый JSON-конфиг (не diff, не патч и не текст с пояснениями).',
+    'ВСЕГДА возвращай ПОЛНЫЙ актуальный JSON-конфиг со ВСЕМИ секциями:',
+    'не diff, не патч, не фрагмент и не текст с пояснениями.',
+    'Никогда не удаляй существующие секции и поля и не оставляй их пустыми,',
+    'если пользователь явно не попросил об этом.',
+    '',
+    'Если запрос НЕ про внешний вид или контент страницы (посторонние темы, вопросы,',
+    'бессмыслица) — НЕ меняй конфиг: верни его без изменений и в поле "message"',
+    'объясни, что ассистент правит только страницу.',
+    '',
+    'Поле "message" — короткий ответ пользователю простыми словами: что именно ты изменил.',
+    'В поле "config" всегда лежит полный конфиг.',
+    '',
     'Жёсткие правила схемы:',
     `1. Верхний уровень — объект с ключами: ${CONFIG_KEYS.join(', ')}.`,
     `2. "sections" — массив объектов. Поле section.type строго из списка: ${SECTION_TYPES.join(', ')}.`,
@@ -186,24 +268,35 @@ function buildSystemPrompt() {
 function getConfigResponseSchema() {
   return {
     type: 'OBJECT',
-    required: ['theme', 'layout', 'page', 'header', 'footer', 'sections'],
+    required: ['message', 'config'],
     properties: {
-      theme: { type: 'OBJECT' },
-      layout: { type: 'OBJECT' },
-      page: { type: 'OBJECT' },
-      header: { type: 'OBJECT' },
-      footer: { type: 'OBJECT' },
-      sections: {
-        type: 'ARRAY',
-        items: {
-          type: 'OBJECT',
-          required: ['type'],
-          properties: {
-            id: { type: 'STRING' },
-            type: { type: 'STRING', enum: SECTION_TYPES },
-            variant: { type: 'STRING' },
-            surface: { type: 'STRING', enum: Array.from(SURFACES) },
-            motion: { type: 'STRING', enum: Array.from(MOTIONS) }
+      message: {
+        type: 'STRING',
+        description:
+          'Короткий ответ пользователю: что изменено, либо почему конфиг оставлен без изменений.'
+      },
+      config: {
+        type: 'OBJECT',
+        required: ['theme', 'layout', 'page', 'header', 'footer', 'sections'],
+        properties: {
+          theme: { type: 'OBJECT' },
+          layout: { type: 'OBJECT' },
+          page: { type: 'OBJECT' },
+          header: { type: 'OBJECT' },
+          footer: { type: 'OBJECT' },
+          sections: {
+            type: 'ARRAY',
+            items: {
+              type: 'OBJECT',
+              required: ['type'],
+              properties: {
+                id: { type: 'STRING' },
+                type: { type: 'STRING', enum: SECTION_TYPES },
+                variant: { type: 'STRING' },
+                surface: { type: 'STRING', enum: Array.from(SURFACES) },
+                motion: { type: 'STRING', enum: Array.from(MOTIONS) }
+              }
+            }
           }
         }
       }
@@ -288,9 +381,14 @@ async function generateValidatedConfig({ env, instruction, currentConfig }) {
       continue;
     }
 
-    const errors = validateConfig(candidate);
+    const modelConfig = candidate?.config;
+    const errors = validateConfig(modelConfig);
     if (errors.length === 0) {
-      return { ok: true, config: candidate };
+      return {
+        ok: true,
+        config: modelConfig,
+        message: typeof candidate?.message === 'string' ? candidate.message.trim() : ''
+      };
     }
 
     lastValidationErrors = errors;
@@ -302,7 +400,7 @@ async function generateValidatedConfig({ env, instruction, currentConfig }) {
       role: 'user',
       parts: [
         {
-          text: `Конфиг не прошёл валидацию:\n- ${errors.join('\n- ')}\nИсправь эти ошибки и верни полный валидный JSON-конфиг.`
+          text: `Конфиг не прошёл валидацию:\n- ${errors.join('\n- ')}\nИсправь эти ошибки и верни полный валидный JSON-конфиг (объект с полями "message" и "config").`
         }
       ]
     });
@@ -365,7 +463,28 @@ async function handleAssistant(request, env, corsHeaders) {
       );
     }
 
-    return jsonResponse({ config: result.config }, 200, corsHeaders);
+    // Страховка: сливаем ответ модели с текущим конфигом, чтобы не затереть
+    // существующие секции/поля, и валидируем результат ещё раз.
+    const merged = mergeConfig(currentConfig, result.config);
+    const mergedErrors = validateConfig(merged);
+    if (mergedErrors.length > 0) {
+      return jsonResponse(
+        {
+          error: 'Ответ ассистента не прошёл проверку, черновик не изменён.',
+          details: mergedErrors
+        },
+        400,
+        corsHeaders
+      );
+    }
+
+    const changed = !deepEqual(merged, currentConfig);
+
+    return jsonResponse(
+      { config: merged, message: result.message || '', changed },
+      200,
+      corsHeaders
+    );
   } catch (err) {
     return jsonResponse(
       { error: err?.message || 'Внутренняя ошибка при обращении к модели.' },
