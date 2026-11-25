@@ -3,11 +3,12 @@ main = "src/index.js"
 compatibility_date = "2026-11-01"
 
 [vars]
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3.5-flash"
 SUPABASE_URL = "https://wwwldtxqxhqcwahvcpqx.supabase.co"
 # Домен админки на Pages. Обнови после деплоя, если pages.dev выдал суффикс.
 ALLOWED_ORIGINS = "https://react-chameleon.pages.dev"
 
-# Секреты задаются командой (в файле не хранятся):
+# Секреты задаются отдельно (в файле не хранятся):
 #   npx wrangler secret put GEMINI_API_KEY
-#   npx wrangler secret put SUPABASE_ANON_KEY
+#   npx wrangler secret put ADMIN_PASSWORD
+#   npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
