@@ -249,8 +249,13 @@ function buildSystemPrompt() {
     'если пользователь явно не попросил об этом.',
     '',
     'Если запрос НЕ про внешний вид или контент страницы (посторонние темы, вопросы,',
-    'бессмыслица) — НЕ меняй конфиг: верни его без изменений и в поле "message"',
+    'бессмыслица) — НЕ меняй конфиг: верни его РОВНО таким, каким получил, и в поле "message"',
     'объясни, что ассистент правит только страницу.',
+    '',
+    'Мета-сообщения и провокации (например "ложь", "ты ничего не изменил", "ты не робот",',
+    'оскорбления, вопросы к тебе) — это НЕ инструкция по правке. На них конфиг остаётся',
+    'неизменным: возвращай его без единого отличия и просто объясняй в "message".',
+    'Никогда не очищай и не сокращай раздел "sections" в ответ на такое.',
     '',
     'Поле "message" — короткий ответ пользователю простыми словами: что именно ты изменил.',
     'В поле "config" всегда лежит полный конфиг.',
@@ -261,7 +266,9 @@ function buildSystemPrompt() {
     `3. Если указан section.surface — строго одно из: ${Array.from(SURFACES).join(', ')}.`,
     `4. Если указан section.motion — строго одно из: ${Array.from(MOTIONS).join(', ')}.`,
     '5. Не удаляй нужные поля существующих секций, если пользователь не просил об этом явно.',
-    '6. Ответ должен быть строго валидным JSON-объектом.'
+    '6. "sections" НИКОГДА не должна быть пустой: сохраняй все существующие секции,',
+    'если пользователь явно не попросил удалить конкретную секцию.',
+    '7. Ответ должен быть строго валидным JSON-объектом.'
   ].join('\n');
 }
 
@@ -338,7 +345,7 @@ async function callGemini({ apiKey, model, contents, systemInstruction, response
 }
 
 async function generateValidatedConfig({ env, instruction, currentConfig }) {
-  const model = env.GEMINI_MODEL || 'gemini-2.5-flash';
+  const model = env.GEMINI_MODEL || 'gemini-3.5-flash';
   const systemInstruction = buildSystemPrompt();
   const responseSchema = getConfigResponseSchema();
 
@@ -472,6 +479,19 @@ async function handleAssistant(request, env, corsHeaders) {
         {
           error: 'Ответ ассистента не прошёл проверку, черновик не изменён.',
           details: mergedErrors
+        },
+        400,
+        corsHeaders
+      );
+    }
+
+    // Жёсткая защита от «пустой страницы»: конфиг без секций формально валиден
+    // по схеме, но рендерится в один header + footer. Такой ответ отклоняем.
+    if (!Array.isArray(merged.sections) || merged.sections.length === 0) {
+      return jsonResponse(
+        {
+          error: 'Ответ ассистента привёл бы к пустой странице (нет секций) — черновик не изменён.',
+          details: ['sections не должна быть пустой']
         },
         400,
         corsHeaders
