@@ -3,7 +3,7 @@
 
 // Метка сборки воркера. Возвращается в ответе /api/assistant, чтобы в интерфейсе
 // было видно, что задеплоена именно эта версия кода (не старый воркер).
-const WORKER_VERSION = '2026-11-24.2';
+const WORKER_VERSION = '2026-11-25.2';
 
 const SURFACES = new Set(['default', 'alt', 'accent', 'dark']);
 const MOTIONS = new Set(['fade', 'from-left', 'from-right', 'from-bottom', 'none']);
@@ -22,6 +22,20 @@ const SECTION_TYPES = [
 ];
 
 const CONFIG_KEYS = ['theme', 'layout', 'page', 'header', 'footer', 'sections'];
+
+// Допустимые значения section.variant (компоновка/«сетка» секции) по её типу.
+// Держать в синхроне с src/configSchema.js и списками toVariant(...) в Page.jsx.
+const SECTION_VARIANTS = {
+  hero: ['split', 'centered', 'centered-backdrop', 'image-background', 'lead-card', 'promo-carousel', 'bento'],
+  intro: ['statement', 'split'],
+  stats: ['inline', 'cards', 'statement-row'],
+  services: ['editorial-grid', 'image-cards', 'clean', 'compact', 'list'],
+  about: ['split', 'centered', 'image-first', 'image-overlap'],
+  pricing: ['simple', 'featured', 'minimal', 'offer-list'],
+  testimonials: ['cards', 'editorial', 'featured', 'featured-quote'],
+  location: ['split', 'stacked', 'contact-panel'],
+  cta: ['banner', 'centered', 'split-banner']
+};
 
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 
@@ -48,6 +62,12 @@ function validateConfig(config) {
     if (!SECTION_TYPES.includes(section.type)) {
       errors.push(`sections[${index}].type="${section.type}" не поддерживается.`);
     }
+    const allowedVariants = SECTION_VARIANTS[section.type];
+    if (section.variant !== undefined && allowedVariants && !allowedVariants.includes(section.variant)) {
+      errors.push(
+        `sections[${index}].variant="${section.variant}" не поддерживается для type="${section.type}".`
+      );
+    }
     if (section.surface !== undefined && !SURFACES.has(section.surface)) {
       errors.push(`sections[${index}].surface="${section.surface}" не поддерживается.`);
     }
@@ -73,16 +93,19 @@ function isKeyedArray(value) {
 }
 
 function mergeKeyedArray(current, incoming) {
-  const incomingById = new Map(incoming.map((item) => [item.id, item]));
-  const currentIds = new Set(current.map((item) => item.id));
+  const currentById = new Map(current.map((item) => [item.id, item]));
+  const incomingIds = new Set(incoming.map((item) => item.id));
 
-  const merged = current.map((item) => {
-    const incomingItem = incomingById.get(item.id);
-    return incomingItem ? mergeValue(item, incomingItem) : item;
+  // Порядок берём из ответа модели (чтобы работала перестановка блоков),
+  // но каждый элемент сливаем с текущим, а «забытые» моделью секции
+  // дописываем в конец — так мы никогда их не теряем.
+  const merged = incoming.map((item) => {
+    const currentItem = currentById.get(item.id);
+    return currentItem ? mergeValue(currentItem, item) : item;
   });
 
-  const added = incoming.filter((item) => !currentIds.has(item.id));
-  return merged.concat(added);
+  const kept = current.filter((item) => !incomingIds.has(item.id));
+  return merged.concat(kept);
 }
 
 function mergeValue(current, incoming) {
@@ -242,6 +265,10 @@ async function commitToSupabase({ env, config, currentVersion, updatedBy }) {
 }
 
 function buildSystemPrompt() {
+  const variantLines = Object.entries(SECTION_VARIANTS)
+    .map(([type, list]) => `${type}: ${list.join(', ')}`)
+    .join('; ');
+
   return [
     'Ты ассистент редактирования лендинга. Ты правишь ТОЛЬКО настройки страницы:',
     'тему и цвета, шрифты, тексты, секции (их состав, порядок, variant, surface, motion),',
@@ -270,15 +297,39 @@ function buildSystemPrompt() {
     '"message" (строка) и "config" (объект с полным конфигом). Ничего кроме них.',
     'Это не описание изменений, а сам готовый конфиг целиком.',
     '',
+    'Что именно ты можешь менять (это и есть "сетка", компоновка и оформление страницы):',
+    `1. section.variant — компоновка/сетка секции. Допустимые значения по типу секции — ${variantLines}.`,
+    '   Неверный variant игнорируется и секция вернётся к виду по умолчанию, поэтому всегда',
+    '   выбирай значение строго из списка выше.',
+    '2. section.surface — фон секции: default | alt | accent | dark.',
+    '3. section.motion — анимация появления: fade | from-left | from-right | from-bottom | none.',
+    '4. section.columns — только для type="services": число колонок сетки, 1–4.',
+    '5. Только для type="hero": section.gridTemplate (CSS-сетка, напр. "1.2fr .8fr"),',
+    '   section.align ("left" | "center" — выравнивание текста героя; у героев с фоновой',
+    '   картинкой по умолчанию "center"), section.overlay (прозрачность фоновой картинки, 0–1),',
+    '   section.imagePosition ("center" | "top" | "bottom" — позиция фоновой картинки).',
+    '6. layout: contentMaxWidth ("1200px"), pagePadding ("0 28px"), sectionSpacing ("104px"),',
+    '   headerHeight ("82px") — ширина контента, отступы и высота шапки.',
+    '7. theme: цвета theme.colors.* (background, surface, surfaceAlt, text, muted, accent,',
+    '   accentStrong, accentSoft, border, dark, onDark), шрифты theme.fonts.heading/body,',
+    '   формы theme.shapes.cardRadius/buttonRadius/sectionRadius, эффекты theme.effects.shadow/transition.',
+    '8. Порядок блоков = порядок элементов массива sections: переставляй их, чтобы изменить структуру страницы.',
+    '9. header.navigation (массив {label, target}), header.cta ({label, href}), header.logo,',
+    '   footer.* и page.title/description.',
+    '',
+    'Если просят изменить сетку/компоновку — меняй именно section.variant (и columns/gridTemplate',
+    'там, где это применимо) на валидное значение из списка.',
+    '',
     'Жёсткие правила схемы:',
     `1. Верхний уровень — объект с ключами: ${CONFIG_KEYS.join(', ')}.`,
     `2. "sections" — массив объектов. Поле section.type строго из списка: ${SECTION_TYPES.join(', ')}.`,
-    `3. Если указан section.surface — строго одно из: ${Array.from(SURFACES).join(', ')}.`,
-    `4. Если указан section.motion — строго одно из: ${Array.from(MOTIONS).join(', ')}.`,
-    '5. Не удаляй нужные поля существующих секций, если пользователь не просил об этом явно.',
-    '6. "sections" НИКОГДА не должна быть пустой: сохраняй все существующие секции,',
+    '3. section.variant — строго из допустимых для его type (список приведён выше).',
+    `4. Если указан section.surface — строго одно из: ${Array.from(SURFACES).join(', ')}.`,
+    `5. Если указан section.motion — строго одно из: ${Array.from(MOTIONS).join(', ')}.`,
+    '6. Не удаляй нужные поля существующих секций, если пользователь не просил об этом явно.',
+    '7. "sections" НИКОГДА не должна быть пустой: сохраняй все существующие секции,',
     'если пользователь явно не попросил удалить конкретную секцию.',
-    '7. Ответ должен быть строго валидным JSON-объектом.'
+    '8. Ответ должен быть строго валидным JSON-объектом.'
   ].join('\n');
 }
 
