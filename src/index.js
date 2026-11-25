@@ -1,5 +1,10 @@
 // --- Схема конфига (вшита сюда, чтобы воркер был одним автономным файлом) ---
 // Источник: src/configSchema.js — единый набор допустимых значений для рендера и админки.
+
+// Метка сборки воркера. Возвращается в ответе /api/assistant, чтобы в интерфейсе
+// было видно, что задеплоена именно эта версия кода (не старый воркер).
+const WORKER_VERSION = '2026-11-24.2';
+
 const SURFACES = new Set(['default', 'alt', 'accent', 'dark']);
 const MOTIONS = new Set(['fade', 'from-left', 'from-right', 'from-bottom', 'none']);
 
@@ -257,8 +262,13 @@ function buildSystemPrompt() {
     'неизменным: возвращай его без единого отличия и просто объясняй в "message".',
     'Никогда не очищай и не сокращай раздел "sections" в ответ на такое.',
     '',
-    'Поле "message" — короткий ответ пользователю простыми словами: что именно ты изменил.',
-    'В поле "config" всегда лежит полный конфиг.',
+    'Если пользователь просит реально что-то изменить — ты ОБЯЗАН изменить соответствующие',
+    'поля в "config" (тексты, цвета, состав/порядок секций и т.д.). Недостаточно написать',
+    'об этом в "message" — правка должна быть видна в самом "config" при сравнении с входным.',
+    '',
+    'Формат ответа: строго один JSON-объект ровно с двумя полями —',
+    '"message" (строка) и "config" (объект с полным конфигом). Ничего кроме них.',
+    'Это не описание изменений, а сам готовый конфиг целиком.',
     '',
     'Жёсткие правила схемы:',
     `1. Верхний уровень — объект с ключами: ${CONFIG_KEYS.join(', ')}.`,
@@ -272,46 +282,7 @@ function buildSystemPrompt() {
   ].join('\n');
 }
 
-function getConfigResponseSchema() {
-  return {
-    type: 'OBJECT',
-    required: ['message', 'config'],
-    properties: {
-      message: {
-        type: 'STRING',
-        description:
-          'Короткий ответ пользователю: что изменено, либо почему конфиг оставлен без изменений.'
-      },
-      config: {
-        type: 'OBJECT',
-        required: ['theme', 'layout', 'page', 'header', 'footer', 'sections'],
-        properties: {
-          theme: { type: 'OBJECT' },
-          layout: { type: 'OBJECT' },
-          page: { type: 'OBJECT' },
-          header: { type: 'OBJECT' },
-          footer: { type: 'OBJECT' },
-          sections: {
-            type: 'ARRAY',
-            items: {
-              type: 'OBJECT',
-              required: ['type'],
-              properties: {
-                id: { type: 'STRING' },
-                type: { type: 'STRING', enum: SECTION_TYPES },
-                variant: { type: 'STRING' },
-                surface: { type: 'STRING', enum: Array.from(SURFACES) },
-                motion: { type: 'STRING', enum: Array.from(MOTIONS) }
-              }
-            }
-          }
-        }
-      }
-    }
-  };
-}
-
-async function callGemini({ apiKey, model, contents, systemInstruction, responseSchema }) {
+async function callGemini({ apiKey, model, contents, systemInstruction }) {
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
   const res = await fetch(endpoint, {
@@ -324,8 +295,7 @@ async function callGemini({ apiKey, model, contents, systemInstruction, response
       contents,
       generationConfig: {
         temperature: 0.2,
-        responseMimeType: 'application/json',
-        responseSchema
+        responseMimeType: 'application/json'
       }
     })
   });
@@ -347,7 +317,6 @@ async function callGemini({ apiKey, model, contents, systemInstruction, response
 async function generateValidatedConfig({ env, instruction, currentConfig }) {
   const model = env.GEMINI_MODEL || 'gemini-3.5-flash';
   const systemInstruction = buildSystemPrompt();
-  const responseSchema = getConfigResponseSchema();
 
   const contents = [
     {
@@ -370,8 +339,7 @@ async function generateValidatedConfig({ env, instruction, currentConfig }) {
         apiKey: env.GEMINI_API_KEY,
         model,
         contents,
-        systemInstruction,
-        responseSchema
+        systemInstruction
       });
     } catch (err) {
       if (attempt === maxAttempts) {
@@ -388,7 +356,11 @@ async function generateValidatedConfig({ env, instruction, currentConfig }) {
       continue;
     }
 
-    const modelConfig = candidate?.config;
+    // Ответ модели должен быть объектом { message, config }. Терпим и вариант,
+    // когда модель вернула сам конфиг без обёртки.
+    const modelConfig =
+      candidate?.config ??
+      (isObject(candidate) && Array.isArray(candidate.sections) ? candidate : undefined);
     const errors = validateConfig(modelConfig);
     if (errors.length === 0) {
       return {
@@ -501,7 +473,7 @@ async function handleAssistant(request, env, corsHeaders) {
     const changed = !deepEqual(merged, currentConfig);
 
     return jsonResponse(
-      { config: merged, message: result.message || '', changed },
+      { config: merged, message: result.message || '', changed, build: WORKER_VERSION },
       200,
       corsHeaders
     );
