@@ -3,7 +3,7 @@
 
 // Метка сборки воркера. Возвращается в ответе /api/assistant, чтобы в интерфейсе
 // было видно, что задеплоена именно эта версия кода (не старый воркер).
-const WORKER_VERSION = '2026-11-25.2';
+const WORKER_VERSION = '2026-11-25.3';
 
 const SURFACES = new Set(['default', 'alt', 'accent', 'dark']);
 const MOTIONS = new Set(['fade', 'from-left', 'from-right', 'from-bottom', 'none']);
@@ -320,6 +320,26 @@ function buildSystemPrompt() {
     'Если просят изменить сетку/компоновку — меняй именно section.variant (и columns/gridTemplate',
     'там, где это применимо) на валидное значение из списка.',
     '',
+    'Компоновки (variant) и поля каждой — чтобы смена раскладки реально отрисовалась:',
+    '- hero.split: image (сбоку), eyebrow, title, description, primaryAction, secondaryAction, note, trust[].',
+    '- hero.centered / centered-backdrop: image (фоном), title, description, actions; текст по центру.',
+    '- hero.image-background: image (фоном), overlay (0–1), imagePosition, align (по умолчанию center).',
+    '- hero.lead-card: card {title, description, fields[{name,label,type,placeholder,options,required}],',
+    '  submitLabel, footnote, successMessage}, metrics[{value,label}], image (фоном).',
+    '- hero.bento: bento {cards[{kicker,value,title,text,tone:"accent"|"dark"}], strip[{value,label}],',
+    '  mediaTag, gridTemplate}, image, title, description, actions, trust[].',
+    '- hero.promo-carousel: slides[{eyebrow,title,description,highlights[],oldPrice,price,primaryAction,',
+    '  secondaryAction,image,promoBadge{kicker,value,unit,sublabel}}] либо те же поля прямо на секции.',
+    '- intro.statement / split: eyebrow, title, description, aside.',
+    '- stats.inline / cards / statement-row: items[{value,label,detail}].',
+    '- services.<variant>: items[{number,label,title,text,image}], columns (1–4).',
+    '- about.split / centered / image-first / image-overlap: image, features[{title,text}], action.',
+    '- pricing.simple / featured / minimal / offer-list: items[{title,price,priceNote,text,terms,featured,action}].',
+    '- testimonials.cards / editorial / featured / featured-quote: items[{quote,author,rating}], ratingLabel.',
+    '- location.split / stacked / contact-panel: address, phone, hours[{days,time}], mapEmbed, action.',
+    '- cta.banner / centered / split-banner: eyebrow, title, description, action, note.',
+    'Меняя layout — меняй сам раздел (поля выше), а не только название variant.',
+    '',
     'Жёсткие правила схемы:',
     `1. Верхний уровень — объект с ключами: ${CONFIG_KEYS.join(', ')}.`,
     `2. "sections" — массив объектов. Поле section.type строго из списка: ${SECTION_TYPES.join(', ')}.`,
@@ -393,7 +413,10 @@ async function generateValidatedConfig({ env, instruction, currentConfig }) {
         systemInstruction
       });
     } catch (err) {
-      if (attempt === maxAttempts) {
+      if (
+        attempt === maxAttempts ||
+        /Gemini API ответил (?:429|503)\b/.test(err?.message || '')
+      ) {
         throw err;
       }
       contents.push({
